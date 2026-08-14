@@ -1,0 +1,14 @@
+#!/bin/busybox sh
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+clear
+echo "KARLIN VM 0 — фундамент загружен"
+echo "Linux: $(uname -r)"
+echo "Введите команду. Для выхода: poweroff"
+
+export PATH=/bin
+export PS1='> '
+exec /bin/sh
