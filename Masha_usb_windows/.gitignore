@@ -5,6 +5,10 @@ api_key.cmd.*
 .env.*
 sessions/
 *.jsonl
+attachments/
+recordings/
+config.json
+!config.example.json
 
 # Локальные сборки, временные данные и резервные копии.
 bin/
