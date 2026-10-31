@@ -13,6 +13,7 @@ $script:AppDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:ConfigPath = Join-Path $script:AppDirectory 'config.json'
 $script:AgentsPath = Join-Path $script:AppDirectory 'AGENTS.md'
 $script:InstructionsPath = Join-Path $script:AppDirectory 'assistant_instructions.txt'
+. (Join-Path $script:AppDirectory 'Sessions.ps1')
 
 # Готовим память диалога, активную модель и список моделей провайдера.
 $script:History = New-Object System.Collections.ArrayList
@@ -46,11 +47,80 @@ $script:ToolDefinitions = @(
 $script:SlashCommands = @(
     '/help',
     '/commands',
+    '/multi',
     '/models',
     '/model',
+    '/new',
+    '/sessions',
+    '/resume',
+    '/history',
     '/reset',
     '/exit'
 )
+
+function Initialize-CommandHistory {
+    # Загружаем последние введённые строки из каталога сохранённых сессий.
+    $script:CommandHistoryPath = Join-Path $script:SessionDirectory 'command_history.txt'
+    $script:CommandHistory = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $script:CommandHistoryPath -PathType Leaf)) { return }
+    try {
+        foreach ($line in [System.IO.File]::ReadAllLines($script:CommandHistoryPath, [System.Text.Encoding]::UTF8)) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) { [void]$script:CommandHistory.Add($line) }
+        }
+        while ($script:CommandHistory.Count -gt 100) { $script:CommandHistory.RemoveAt(0) }
+    } catch {
+        Write-Host ('Не удалось прочитать историю команд: {0}' -f $_.Exception.Message)
+    }
+}
+
+function Add-CommandHistory {
+    # Сохраняем новую строку и держим историю ограниченной последними ста командами.
+    param([Parameter(Mandatory = $true)][string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    if ($script:CommandHistory.Count -eq 0 -or [string]$script:CommandHistory[$script:CommandHistory.Count - 1] -ne $Text) {
+        [void]$script:CommandHistory.Add($Text)
+    }
+    while ($script:CommandHistory.Count -gt 100) { $script:CommandHistory.RemoveAt(0) }
+    try {
+        [System.IO.File]::WriteAllLines($script:CommandHistoryPath, [string[]]$script:CommandHistory.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Write-Host ('Не удалось сохранить историю команд: {0}' -f $_.Exception.Message)
+    }
+}
+
+function Convert-MultilineLinesToText {
+    # Соединяем строки сообщения, сохраняя пустые строки и исходный порядок.
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines)
+    return [string]::Join("`r`n", $Lines)
+}
+
+function Read-MultilineChatInput {
+    # Читаем сообщение построчно до маркера /send; /cancel отменяет ввод.
+    Write-Host 'Многострочный ввод: вставь или набери текст, затем отдельной строкой /send; /cancel отменяет.' -ForegroundColor DarkGray
+    $lines = New-Object System.Collections.ArrayList # Строки текущего сообщения.
+    while ($true) {
+        if ($lines.Count -eq 0) {
+            [Console]::ForegroundColor = [ConsoleColor]::Blue
+            [Console]::Write('Олежка')
+            [Console]::ForegroundColor = [ConsoleColor]::White
+            [Console]::Write('> ')
+        } else {
+            [Console]::ForegroundColor = [ConsoleColor]::White
+            [Console]::Write('...> ')
+        }
+        $line = [Console]::ReadLine() # ReadLine принимает и набранные, и вставленные строки.
+        if ($null -eq $line -or $line -ceq '/cancel') {
+            [Console]::ResetColor()
+            Write-Host 'Многострочный ввод отменён.' -ForegroundColor DarkGray
+            return ''
+        }
+        if ($line -ceq '/send') { break }
+        [void]$lines.Add([string]$line)
+    }
+    [Console]::ResetColor()
+    $text = Convert-MultilineLinesToText -Lines ([string[]]$lines.ToArray())
+    return $text
+}
 
 function Read-ChatInput {
     # Читаем строку посимвольно и показываем подстановки для команд, начинающихся с косой черты.
@@ -59,16 +129,22 @@ function Read-ChatInput {
         [Parameter(Mandatory = $true)][string]$Prompt
     )
 
-    [Console]::Write($Prompt + '> ')
+    [Console]::ForegroundColor = [ConsoleColor]::Blue
+    [Console]::Write($Prompt)
+    [Console]::ForegroundColor = [ConsoleColor]::White
+    [Console]::Write('> ')
     $buffer = New-Object System.Text.StringBuilder # Текст, набранный пользователем.
     $promptRow = [Console]::CursorTop # Строка консоли, в которой находится приглашение.
     $inputColumn = [Console]::CursorLeft # Столбец начала пользовательского ввода.
     $suggestionRows = 0 # Количество строк списка, которые нужно стереть перед обновлением.
     $matches = @() # Команды, совпадающие с набранным префиксом.
     $selectedIndex = 0 # Индекс выделенной команды в списке совпадений.
+    $historyIndex = $script:CommandHistory.Count # Позиция просмотра истории; конец означает текущий ввод.
+    $historyDraft = '' # Текст, который пользователь набрал до просмотра истории.
 
     while ($true) {
         $keyInfo = [Console]::ReadKey($true) # Читаем клавишу, не печатая её автоматически.
+        $historyChanged = $false # Отмечаем, когда ввод заменён выбранной строкой истории.
 
         if ($keyInfo.Key -eq [ConsoleKey]::Enter) {
             $inputEndRow = [Console]::CursorTop # Запоминаем фактический конец строки, в том числе после переноса.
@@ -82,7 +158,10 @@ function Read-ChatInput {
             }
             [Console]::SetCursorPosition($inputEndColumn, $inputEndRow)
             [Console]::WriteLine()
-            return $buffer.ToString()
+            [Console]::ResetColor()
+            $submittedText = $buffer.ToString()
+            if (-not [string]::IsNullOrWhiteSpace($submittedText)) { Add-CommandHistory -Text $submittedText }
+            return $submittedText
         }
 
         if ($keyInfo.Key -eq [ConsoleKey]::Backspace) {
@@ -106,10 +185,22 @@ function Read-ChatInput {
             [Console]::Write((' ' * ([Console]::WindowWidth - $inputColumn)))
             [Console]::SetCursorPosition($inputColumn, $promptRow)
             [Console]::Write($buffer.ToString())
-        } elseif ($keyInfo.Key -eq [ConsoleKey]::UpArrow -and $matches.Count -gt 0) {
+        } elseif ($keyInfo.Key -eq [ConsoleKey]::UpArrow -and $matches.Count -gt 0 -and $historyIndex -eq $script:CommandHistory.Count) {
             $selectedIndex = ($selectedIndex - 1 + $matches.Count) % $matches.Count
-        } elseif ($keyInfo.Key -eq [ConsoleKey]::DownArrow -and $matches.Count -gt 0) {
+        } elseif ($keyInfo.Key -eq [ConsoleKey]::DownArrow -and $matches.Count -gt 0 -and $historyIndex -eq $script:CommandHistory.Count) {
             $selectedIndex = ($selectedIndex + 1) % $matches.Count
+        } elseif ($keyInfo.Key -eq [ConsoleKey]::UpArrow -and $script:CommandHistory.Count -gt 0) {
+            if ($historyIndex -eq $script:CommandHistory.Count) { $historyDraft = $buffer.ToString() }
+            if ($historyIndex -gt 0) { $historyIndex-- }
+            [void]$buffer.Clear()
+            [void]$buffer.Append([string]$script:CommandHistory[$historyIndex])
+            $historyChanged = $true
+        } elseif ($keyInfo.Key -eq [ConsoleKey]::DownArrow -and $historyIndex -lt $script:CommandHistory.Count) {
+            $historyIndex++
+            [void]$buffer.Clear()
+            if ($historyIndex -eq $script:CommandHistory.Count) { [void]$buffer.Append($historyDraft) }
+            else { [void]$buffer.Append([string]$script:CommandHistory[$historyIndex]) }
+            $historyChanged = $true
         } elseif (-not [char]::IsControl($keyInfo.KeyChar)) {
             [void]$buffer.Append($keyInfo.KeyChar)
             [Console]::Write($keyInfo.KeyChar)
@@ -117,6 +208,19 @@ function Read-ChatInput {
             continue
         }
 
+        if ($historyChanged) {
+            # Перерисовываем многострочный ввод и прежние подсказки перед показом выбранной команды.
+            $inputEndRow = [Console]::CursorTop
+            $clearThroughRow = [Math]::Max($inputEndRow, $promptRow + $suggestionRows)
+            for ($clearRow = $promptRow; $clearRow -le $clearThroughRow -and $clearRow -lt [Console]::BufferHeight; $clearRow++) {
+                [Console]::SetCursorPosition(0, $clearRow)
+                [Console]::Write((' ' * ([Console]::WindowWidth - 1)))
+            }
+            [Console]::SetCursorPosition($inputColumn, $promptRow)
+            [Console]::Write($buffer.ToString())
+            $historyChanged = $false
+            $suggestionRows = 0
+        }
         $inputEndRow = [Console]::CursorTop # Запоминаем конец введённого текста перед перерисовкой подсказок.
         $inputEndColumn = [Console]::CursorLeft # Запоминаем столбец конца текста перед перерисовкой.
 
@@ -177,6 +281,7 @@ function Read-ChatInput {
         if (-not $currentText.StartsWith([string]'/')) {
             [Console]::SetCursorPosition($inputEndColumn, $inputEndRow)
         }
+        [Console]::ForegroundColor = [ConsoleColor]::White
     }
 }
 
@@ -186,9 +291,14 @@ function Show-Help {
     Write-Host 'Команды чата:' -ForegroundColor Cyan
     Write-Host '  /помощь, /help       - показать эту справку'
     Write-Host '  /команды, /commands  - список системных и PowerShell-команд'
+    Write-Host '  /multi               - ввести многострочное сообщение; завершить строкой /send'
     Write-Host '  /модели, /models     - получить список моделей провайдера'
     Write-Host '  /модель, /model      - выбрать модель по ID или номеру'
-    Write-Host '  /сброс, /reset       - очистить историю диалога'
+    Write-Host '  /new                 - начать новый диалог'
+    Write-Host '  /sessions            - список сохранённых диалогов'
+    Write-Host '  /resume              - открыть сохранённый диалог'
+    Write-Host '  /history             - показать журнал текущего диалога'
+    Write-Host '  /сброс, /reset       - новый диалог, старый сохраняется'
     Write-Host '  /выход, /exit        - закрыть консоль'
     Write-Host ''
 }
@@ -199,9 +309,13 @@ function Show-CommandList {
     Write-Host 'Встроенные команды консоли:' -ForegroundColor Cyan
     Write-Host '  /помощь                 показать справку'
     Write-Host '  /команды                показать эту памятку'
+    Write-Host '  /multi                  начать многострочный ввод; /send отправляет, /cancel отменяет'
     Write-Host '  /модели                 получить список моделей AITunnel'
     Write-Host '  /модель                 выбрать модель по номеру или ID'
-    Write-Host '  /сброс                  очистить историю диалога'
+    Write-Host '  /new                    новый диалог без удаления старого'
+    Write-Host '  /sessions, /resume      список диалогов и выбор'
+    Write-Host '  /history                показать журнал текущего диалога'
+    Write-Host '  /сброс                  новый диалог без удаления старого'
     Write-Host '  /выход                  закрыть программу'
     Write-Host ''
     Write-Host 'Файлы и папки:' -ForegroundColor Cyan
@@ -243,10 +357,6 @@ function Show-CommandList {
     Write-Host ''
     Write-Host 'Это основные примеры, а не полный каталог: Windows PowerShell содержит много других команд.' -ForegroundColor DarkGray
     Write-Host 'Можно написать задачу обычными словами — агент сам выберет подходящие команды.'
-    Write-Host ''
-    Write-Host 'PowerShell запускается без дополнительного окна подтверждения от имени текущего пользователя.' -ForegroundColor Yellow
-    Write-Host 'Правила AGENTS.md по опасным действиям сохраняются. Административные действия сработают только при повышенных правах программы.' -ForegroundColor Yellow
-    Write-Host 'Результаты команд передаются провайдеру ИИ. Не поручай обработку секретных данных.' -ForegroundColor Yellow
     Write-Host ''
 }
 
@@ -436,7 +546,6 @@ function Invoke-AgentTurn {
             $callId = [string]$call.id # Идентификатор вызова, возвращённый провайдером.
             if ([string]::IsNullOrWhiteSpace($callId)) {
                 $callId = 'call_local_' + [Guid]::NewGuid().ToString('N') # Локальный ID для согласования ответа при пустом ID провайдера.
-                Write-Host 'Провайдер не вернул ID вызова; создан внутренний ID для продолжения диалога.' -ForegroundColor Yellow
             }
 
             $functionName = [string]$call.function.name # Имя функции, запрошенной моделью.
@@ -468,13 +577,11 @@ function Invoke-AgentTurn {
                 if (-not [string]::IsNullOrEmpty([string]$env:AITUNNEL_API_KEY)) {
                     $safeCommand = $safeCommand.Replace([string]$env:AITUNNEL_API_KEY, '[СКРЫТЫЙ КЛЮЧ]')
                 }
-                Write-Host ''
-                Write-Host 'Модель запускает PowerShell-команду:' -ForegroundColor Yellow
-                Write-Host $safeCommand -ForegroundColor DarkYellow
+                Add-SessionEvent @{ type='tool_start'; command=$safeCommand }
                 $toolResult = Invoke-LocalPowerShell -Command $command
-                if ($toolResult.stdout) { Write-Host $toolResult.stdout -ForegroundColor Gray }
-                if ($toolResult.stderr) { Write-Host $toolResult.stderr -ForegroundColor Red }
-                Write-Host ('Код завершения: {0}' -f $toolResult.exit_code) -ForegroundColor DarkGray
+                $safeResult = ConvertTo-Json -InputObject $toolResult -Depth 4 -Compress
+                if (-not [string]::IsNullOrEmpty([string]$env:AITUNNEL_API_KEY)) { $safeResult = $safeResult.Replace([string]$env:AITUNNEL_API_KEY, '[СКРЫТЫЙ КЛЮЧ]') }
+                Add-SessionEvent @{ type='tool'; command=$safeCommand; result=$safeResult }
             }
 
             $toolContent = ConvertTo-Json -InputObject $toolResult -Depth 4 -Compress # Формируем ответ инструмента для следующего шага API.
@@ -493,6 +600,7 @@ function Save-CompletedTurn {
         [Parameter(Mandatory = $true)][string]$AssistantText
     )
 
+    Add-SessionEvent @{ type='turn'; user=$UserText; assistant=$AssistantText; model=$script:Model }
     [void]$script:History.Add(@{ role = 'user'; content = $UserText })
     [void]$script:History.Add(@{ role = 'assistant'; content = $AssistantText })
     while ($script:History.Count -gt $script:HistoryLimit) {
@@ -699,49 +807,43 @@ function Show-RequestError {
     Write-Host ''
     if ($statusCode) {
         if ($statusDescription) {
-            Write-Host ('Запрос не выполнен (HTTP {0} {1}).' -f $statusCode, $statusDescription) -ForegroundColor Red
+            Write-Host ('Запрос не выполнен (HTTP {0} {1}).' -f $statusCode, $statusDescription)
         } else {
-            Write-Host ('Запрос не выполнен (HTTP {0}).' -f $statusCode) -ForegroundColor Red
+            Write-Host ('Запрос не выполнен (HTTP {0}).' -f $statusCode)
         }
     } else {
-        Write-Host 'Ошибка произошла до получения HTTP-ответа.' -ForegroundColor Red
+        Write-Host 'Ошибка произошла до получения HTTP-ответа.'
     }
 
     if ($providerMessage) {
-        Write-Host ('Сообщение провайдера: {0}' -f $providerMessage) -ForegroundColor Red
+        Write-Host ('Сообщение провайдера: {0}' -f $providerMessage)
     } elseif ($errorText) {
-        Write-Host ('Ошибка: {0}' -f $errorText) -ForegroundColor Red
+        Write-Host ('Ошибка: {0}' -f $errorText)
     }
     if ($providerType -or $providerCode) {
-        Write-Host ('Данные провайдера: тип={0}; код={1}' -f $providerType, $providerCode) -ForegroundColor Yellow
+        Write-Host ('Данные провайдера: тип={0}; код={1}' -f $providerType, $providerCode)
     }
     if ($causeText) {
-        Write-Host ('Причина сети или системы: {0}' -f $causeText) -ForegroundColor Yellow
+        Write-Host ('Причина сети или системы: {0}' -f $causeText)
     }
     if ($responseBody) {
-        Write-Host 'Ответ провайдера:' -ForegroundColor DarkYellow
-        Write-Host $responseBody -ForegroundColor DarkYellow
+        Write-Host 'Ответ провайдера:'
+        Write-Host $responseBody
     }
-    if ($requestId) {
-        Write-Host ('Идентификатор запроса провайдера: {0}' -f $requestId) -ForegroundColor DarkGray
-    }
-    $safeModel = [string](& $sanitize $script:Model) # Модель, предварительно очищенная от секрета.
-    $safeBaseUrl = [string](& $sanitize $script:BaseUrl) # Адрес API, предварительно очищенный от секрета.
-    Write-Host ('Модель: {0} | API: {1}' -f $safeModel, $safeBaseUrl) -ForegroundColor DarkGray
-    Write-Host 'Проверь ключ API, подключение к интернету, адрес API и ID модели.' -ForegroundColor Yellow
+    Write-Host 'Проверь ключ API, подключение к интернету, адрес API и ID модели.'
     Write-Host ''
 }
 
 # Проверяем ключ до чтения настроек и не печатаем его в терминал.
 if ([string]::IsNullOrWhiteSpace($env:AITUNNEL_API_KEY) -or
     $env:AITUNNEL_API_KEY -eq 'PASTE_YOUR_AITUNNEL_KEY_HERE') {
-    Write-Host 'Открой api_key.cmd и укажи ключ AITunnel в переменной AITUNNEL_API_KEY.' -ForegroundColor Red
+    Write-Host 'Открой api_key.cmd и укажи ключ AITunnel в переменной AITUNNEL_API_KEY.'
     exit 1
 }
 
 # Загружаем JSON-настройки и выбираем файл системных инструкций.
 if (-not (Test-Path -LiteralPath $script:ConfigPath -PathType Leaf)) {
-    Write-Host 'Файл config.json не найден.' -ForegroundColor Red
+    Write-Host 'Файл config.json не найден.'
     exit 1
 }
 $instructionsPath = $script:AgentsPath # Файл правил проекта имеет приоритет над общими инструкциями.
@@ -749,7 +851,7 @@ if (-not (Test-Path -LiteralPath $instructionsPath -PathType Leaf)) {
     $instructionsPath = $script:InstructionsPath
 }
 if (-not (Test-Path -LiteralPath $instructionsPath -PathType Leaf)) {
-    Write-Host 'Не найден ни AGENTS.md, ни assistant_instructions.txt.' -ForegroundColor Red
+    Write-Host 'Не найден ни AGENTS.md, ни assistant_instructions.txt.'
     exit 1
 }
 
@@ -768,24 +870,24 @@ if ([string]::IsNullOrWhiteSpace($script:BaseUrl) -or
     [string]::IsNullOrWhiteSpace($script:Model) -or
     $script:MaxTokens -lt 1 -or $script:HistoryLimit -lt 0 -or
     $script:TimeoutSeconds -lt 1) {
-    Write-Host 'Проверь base_url, model, max_tokens, history_messages и timeout_seconds в config.json.' -ForegroundColor Red
+    Write-Host 'Проверь base_url, model, max_tokens, history_messages и timeout_seconds в config.json.'
     exit 1
 }
 
-# Выводим краткий статус запуска, не показывая секретные данные.
+# Открываем прошлый журнал или создаём первый до начала работы.
+try { Initialize-SessionStore } catch {
+    Write-Host ('Ошибка сохранения сессии: {0}' -f $_.Exception.Message)
+    exit 1
+}
+Initialize-CommandHistory
+
+# Показываем только короткое приглашение, без служебных путей и состояния API.
 Clear-Host
-Write-Host 'Консоль ИИ AITunnel' -ForegroundColor Cyan
-Write-Host ('Модель: {0}' -f $script:Model) -ForegroundColor Green
-Write-Host ('API: {0}' -f $script:BaseUrl) -ForegroundColor DarkGray
-# Показываем активный файл правил и состояние локального инструмента.
-Write-Host ('Правила: {0}' -f (Split-Path -Leaf $instructionsPath)) -ForegroundColor DarkGray
-Write-Host 'Локальный инструмент PowerShell доступен агенту; команды выполняются от текущего пользователя.' -ForegroundColor Yellow
-Write-Host 'Введи /помощь для справки. Эта консоль не связана с текущим чатом Codex.' -ForegroundColor DarkGray
-Show-Help
+Write-Host 'AITunnel USB Console' -ForegroundColor Cyan
 
 # Обрабатываем сообщения и команды до выхода пользователя.
 while ($true) {
-    $userText = Read-ChatInput -Prompt 'Ты' # Очередная команда или реплика пользователя.
+    $userText = Read-ChatInput -Prompt 'Олежка' # Очередная команда или реплика пользователя.
     if ([string]::IsNullOrWhiteSpace($userText)) {
         continue
     }
@@ -802,14 +904,56 @@ while ($true) {
             Show-CommandList
             continue
         }
-        '^/(сброс|reset)$' {
-            $script:History.Clear()
-            Write-Host 'История диалога очищена.' -ForegroundColor Green
+        '^/multi$' {
+            $userText = Read-MultilineChatInput # Читаем длинное сообщение до отдельной строки /send.
+            if ([string]::IsNullOrWhiteSpace($userText)) { continue }
+            try {
+                Add-SessionEvent @{ type='pending'; text=$userText }
+                $assistantText = Invoke-AgentTurn -UserText $userText
+                Save-CompletedTurn -UserText $userText -AssistantText $assistantText
+                Write-Host ''
+                Write-Host 'Маша' -NoNewline -ForegroundColor Green
+                Write-Host (' [{0}]:' -f $script:Model) -ForegroundColor White
+                Write-Host $assistantText -ForegroundColor White
+                Write-Host ''
+            } catch {
+                $requestError = $_
+                $safeError = [string]$requestError.Exception.Message
+                if (-not [string]::IsNullOrEmpty([string]$env:AITUNNEL_API_KEY)) { $safeError = $safeError.Replace([string]$env:AITUNNEL_API_KEY, '[СКРЫТЫЙ КЛЮЧ]') }
+                try { Add-SessionEvent @{ type='error'; message=$safeError } } catch { Write-Host 'Не удалось записать ошибку в журнал.' }
+                Show-RequestError -ErrorRecord $requestError
+            }
+            continue
+        }
+        '^/(сброс|reset|new)$' {
+            try { New-Session; Write-Host ('Новый диалог: {0}. Старые сохранены.' -f $script:SessionId) -ForegroundColor Green }
+            catch { Write-Host ('Ошибка сессии: {0}' -f $_.Exception.Message) }
+            continue
+        }
+        '^/sessions$' {
+            $sessionFiles = @(Get-SessionList)
+            for ($i = 0; $i -lt $sessionFiles.Count; $i++) {
+                $marker = if ($sessionFiles[$i].BaseName -eq $script:SessionId) { ' *' } else { '' }
+                Write-Host ('{0}. {1}  {2}{3}' -f ($i+1),$sessionFiles[$i].LastWriteTime,$sessionFiles[$i].BaseName,$marker)
+            }
+            continue
+        }
+        '^/resume$' {
+            $sessionFiles = @(Get-SessionList)
+            for ($i = 0; $i -lt $sessionFiles.Count; $i++) { Write-Host ('{0}. {1}  {2}' -f ($i+1),$sessionFiles[$i].LastWriteTime,$sessionFiles[$i].BaseName) }
+            $choice = Read-Host 'Номер сессии'
+            $sessionIndex = 0
+            if (-not [int]::TryParse($choice, [ref]$sessionIndex) -or $sessionIndex -lt 1 -or $sessionIndex -gt $sessionFiles.Count) { Write-Host 'Неверный номер.'; continue }
+            try { Open-Session -Id $sessionFiles[$sessionIndex-1].BaseName; Write-Host ('Открыта сессия: {0}' -f $script:SessionId) -ForegroundColor Green }
+            catch { Write-Host ('Ошибка сессии: {0}' -f $_.Exception.Message) }
+            continue
+        }
+        '^/history$' {
+            try { Show-SessionHistory } catch { Write-Host ('Ошибка журнала: {0}' -f $_.Exception.Message) }
             continue
         }
         '^/(модели|models)$' {
             try {
-                Write-Host 'Загружаю список моделей...' -ForegroundColor DarkGray
                 Get-ProviderModels
             } catch {
                 Show-RequestError -ErrorRecord $_
@@ -823,29 +967,35 @@ while ($true) {
                 if ($modelIndex -ge 0 -and $modelIndex -lt $script:AvailableModels.Count) {
                     $script:Model = $script:AvailableModels[$modelIndex]
                 } else {
-                    Write-Host 'Такого номера в списке нет.' -ForegroundColor Yellow
+                    Write-Host 'Такого номера в списке нет.'
                     continue
                 }
             } elseif (-not [string]::IsNullOrWhiteSpace($modelChoice)) {
                 $script:Model = $modelChoice.Trim()
             } else {
-                Write-Host 'Модель не изменена.' -ForegroundColor Yellow
+                Write-Host 'Модель не изменена.'
                 continue
             }
+            try { Add-SessionEvent @{ type='model'; model=$script:Model } } catch { Write-Host ('Ошибка записи модели: {0}' -f $_.Exception.Message) }
             Write-Host ('Выбрана модель: {0}' -f $script:Model) -ForegroundColor Green
             continue
         }
         default {
             try {
-                Write-Host 'Жду ответ модели...' -ForegroundColor DarkGray
+                Add-SessionEvent @{ type='pending'; text=$userText }
                 $assistantText = Invoke-AgentTurn -UserText $userText # Ответ модели с выполнением её локальных команд.
                 Save-CompletedTurn -UserText $userText -AssistantText $assistantText
                 Write-Host ''
-                Write-Host ('Ответ [{0}]:' -f $script:Model) -ForegroundColor Magenta
-                Write-Host $assistantText
+                Write-Host 'Маша' -NoNewline -ForegroundColor Green
+                Write-Host (' [{0}]:' -f $script:Model) -ForegroundColor White
+                Write-Host $assistantText -ForegroundColor White
                 Write-Host ''
             } catch {
-                Show-RequestError -ErrorRecord $_
+                $requestError = $_
+                $safeError = [string]$requestError.Exception.Message
+                if (-not [string]::IsNullOrEmpty([string]$env:AITUNNEL_API_KEY)) { $safeError = $safeError.Replace([string]$env:AITUNNEL_API_KEY, '[СКРЫТЫЙ КЛЮЧ]') }
+                try { Add-SessionEvent @{ type='error'; message=$safeError } } catch { Write-Host 'Не удалось записать ошибку в журнал.' }
+                Show-RequestError -ErrorRecord $requestError
             }
         }
     }
