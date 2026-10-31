@@ -7,15 +7,11 @@ AITUNNEL USB CONSOLE
 ПЕРВЫЙ ЗАПУСК
 -------------
 1. Скопируйте весь каталог AITunnel_USB_Console на флешку.
-2. Скопируйте api_key.cmd.example в api_key.cmd рядом с программой.
-3. Откройте api_key.cmd в Блокноте и замените
-   PASTE_YOUR_AITUNNEL_KEY_HERE на свой ключ AITunnel,
+2. Откройте api_key.cmd в Блокноте.
+3. Замените PASTE_YOUR_AITUNNEL_KEY_HERE на свой ключ AITunnel,
    сохранив строку в таком виде:
    set "AITUNNEL_API_KEY=sk-aitunnel-ВАШ_КЛЮЧ"
 4. Дважды щёлкните START_AI_CONSOLE.cmd.
-
-В Git хранится только шаблон api_key.cmd.example. Заполненный api_key.cmd
-исключён из Git и должен оставаться только у владельца.
 
 Ключ берётся из переменной окружения процесса и не показывается в консоли.
 Но файл api_key.cmd содержит ключ открытым текстом: не теряйте флешку,
@@ -42,6 +38,7 @@ config.json задаёт адрес API, модель, максимальный 
 /команды, /commands  список команд консоли и Windows PowerShell
 /multi               ввести многострочное сообщение
 /модели, /models     запросить список моделей провайдера
+/status              показать баланс, остаток бюджета и статистику ключа AITunnel
 /модель, /model      выбрать модель для текущей сессии
 /new                 начать новый диалог, сохранив старый
 /sessions            показать сохранённые диалоги
@@ -166,11 +163,9 @@ API-ключ автоматически маскируется и не выво�
 вызова инструментов. Поддержка function calling зависит от выбранной модели.
 Сверяйте доступность модели и тарификацию с актуальным кабинетом AITunnel.
 
-Локальные тесты, не отправляющие запросы провайдеру:
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\test_multiline_input.ps1
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\test_command_history.ps1
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\test_sessions.ps1
-
-Проверки tests/test_agent_turn.ps1 и tests/test_tool_output.ps1 также работают
-без сетевых запросов. Отдельная проверка tests/test_live_agent_turn.ps1
-обращается к AITunnel и может расходовать баланс.
+Команда /status выполняет GET-запросы к /aitunnel/balance и
+/aitunnel/stats/summary с текущим API-ключом. Она показывает баланс аккаунта,
+остаток бюджета ключа, расходы и число запросов за сегодня и за последние
+30 дней. Статистика относится только к текущему ключу и может кэшироваться
+провайдером примерно на час. Тест test_status.ps1 использует фиктивные ответы
+и не обращается к API.

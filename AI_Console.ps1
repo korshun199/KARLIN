@@ -49,6 +49,7 @@ $script:SlashCommands = @(
     '/commands',
     '/multi',
     '/models',
+    '/status',
     '/model',
     '/new',
     '/sessions',
@@ -293,6 +294,7 @@ function Show-Help {
     Write-Host '  /команды, /commands  - список системных и PowerShell-команд'
     Write-Host '  /multi               - ввести многострочное сообщение; завершить строкой /send'
     Write-Host '  /модели, /models     - получить список моделей провайдера'
+    Write-Host '  /status              - показать баланс и статистику ключа AITunnel'
     Write-Host '  /модель, /model      - выбрать модель по ID или номеру'
     Write-Host '  /new                 - начать новый диалог'
     Write-Host '  /sessions            - список сохранённых диалогов'
@@ -311,6 +313,7 @@ function Show-CommandList {
     Write-Host '  /команды                показать эту памятку'
     Write-Host '  /multi                  начать многострочный ввод; /send отправляет, /cancel отменяет'
     Write-Host '  /модели                 получить список моделей AITunnel'
+    Write-Host '  /status                 показать баланс и статистику текущего ключа'
     Write-Host '  /модель                 выбрать модель по номеру или ID'
     Write-Host '  /new                    новый диалог без удаления старого'
     Write-Host '  /sessions, /resume      список диалогов и выбор'
@@ -632,6 +635,69 @@ function Get-ProviderModels {
     Write-Host ''
 }
 
+function Invoke-AitunnelGet {
+    # Выполняем GET-запрос к служебной конечной точке AITunnel тем же ключом.
+    param(
+        # Путь API относительно Base URL, например /aitunnel/balance.
+        [Parameter(Mandatory = $true)][string]$Endpoint
+    )
+
+    $requestUri = $script:BaseUrl.TrimEnd('/') + $Endpoint # Полный адрес выбранной конечной точки.
+    $headers = @{ Authorization = ('Bearer ' + $env:AITUNNEL_API_KEY) } # Ключ передаётся только в заголовке.
+
+    # Включаем TLS 1.2 для совместимости со штатным Windows PowerShell 5.1.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    return Invoke-RestMethod -UseBasicParsing -Uri $requestUri -Method Get `
+        -Headers $headers -TimeoutSec $script:TimeoutSeconds
+}
+
+function Show-AitunnelStatus {
+    # Показываем баланс аккаунта, остаток бюджета ключа и сводную статистику.
+    $culture = [System.Globalization.CultureInfo]::GetCultureInfo('ru-RU') # Русский формат рублей и десятичных чисел.
+    $balanceResponse = $null # Ответ сервиса с балансом и остатком бюджета ключа.
+    $statsResponse = $null # Ответ сервиса с расходами и количеством запросов.
+
+    Write-Host ''
+    Write-Host 'Статус AITunnel' -ForegroundColor Cyan
+    try {
+        $balanceResponse = Invoke-AitunnelGet -Endpoint '/aitunnel/balance' # Запрашиваем баланс аккаунта.
+        if ($null -eq $balanceResponse -or $null -eq $balanceResponse.PSObject.Properties['balance']) {
+            throw 'Ответ AITunnel не содержит поле balance.'
+        }
+
+        $balanceValue = [decimal]$balanceResponse.balance # Баланс аккаунта в рублях.
+        Write-Host ('  Баланс аккаунта: {0} ₽' -f $balanceValue.ToString('N2', $culture)) -ForegroundColor Green
+        $budgetProperty = $balanceResponse.PSObject.Properties['budget'] # Остаток бюджета ключа, если лимит задан.
+        if ($null -ne $budgetProperty -and $null -ne $budgetProperty.Value) {
+            $budgetValue = [decimal]$budgetProperty.Value # Остаток бюджета текущего ключа в рублях.
+            Write-Host ('  Остаток бюджета ключа: {0} ₽' -f $budgetValue.ToString('N2', $culture))
+        } else {
+            Write-Host '  Бюджет ключа: не задан' -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host '  Не удалось получить баланс.' -ForegroundColor Red
+        Show-RequestError -ErrorRecord $_
+    }
+
+    try {
+        $statsResponse = Invoke-AitunnelGet -Endpoint '/aitunnel/stats/summary' # Получаем статистику текущего ключа.
+        Write-Host 'Расходы и запросы по ключу:' -ForegroundColor Cyan
+        Write-Host ('  Сегодня: {0} ₽; запросов: {1}' -f ([decimal]$statsResponse.today_spend).ToString('N2', $culture), [long]$statsResponse.today_requests)
+        Write-Host ('  За 30 дней: {0} ₽; запросов: {1}' -f ([decimal]$statsResponse.month_spend).ToString('N2', $culture), [long]$statsResponse.month_requests)
+        Write-Host ('  Средний расход в день: {0} ₽' -f ([decimal]$statsResponse.avg_daily_spend).ToString('N2', $culture))
+        if (-not [string]::IsNullOrWhiteSpace([string]$statsResponse.top_model_by_spend)) {
+            Write-Host ('  Наибольшие расходы: {0} ({1} ₽)' -f [string]$statsResponse.top_model_by_spend, ([decimal]$statsResponse.top_model_by_spend_value).ToString('N2', $culture))
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$statsResponse.top_model_by_requests)) {
+            Write-Host ('  Больше всего запросов: {0} ({1})' -f [string]$statsResponse.top_model_by_requests, [long]$statsResponse.top_model_by_requests_value)
+        }
+    } catch {
+        Write-Host '  Не удалось получить статистику ключа.' -ForegroundColor Red
+        Show-RequestError -ErrorRecord $_
+    }
+    Write-Host ''
+}
+
 function Show-RequestError {
     # Показываем HTTP-статус, подробности провайдера и сетевую причину, не раскрывая ключ.
     param(
@@ -902,6 +968,10 @@ while ($true) {
         }
         '^/(команды|commands)$' {
             Show-CommandList
+            continue
+        }
+        '^/status$' {
+            Show-AitunnelStatus
             continue
         }
         '^/multi$' {
