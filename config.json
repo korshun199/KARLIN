@@ -1,0 +1,7 @@
+{
+  "base_url": "https://api.aitunnel.ru/v1",
+  "model": "gpt-6-luna",
+  "max_tokens": 2048,
+  "timeout_seconds": 180,
+  "history_messages": 20
+}

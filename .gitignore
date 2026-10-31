@@ -1,0 +1,5 @@
+/api_key.cmd
+/api_key.cmd.*
+!/api_key.cmd.example
+*.before-*
+/masha-agent-test.txt
