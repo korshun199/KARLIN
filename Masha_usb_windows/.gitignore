@@ -1,12 +1,14 @@
 # Секреты и пользовательские данные остаются на компьютере владельца.
 api_key.cmd
 api_key.cmd.*
+api_key.txt
 .env
 .env.*
 sessions/
 *.jsonl
 attachments/
 recordings/
+masha.log
 config.json
 !config.example.json
 
@@ -14,6 +16,8 @@ config.json
 bin/
 obj/
 publish/
+__pycache__/
+*.py[cod]
 *.before-*
 *.bak
 *.tmp

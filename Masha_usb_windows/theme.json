@@ -1,0 +1,22 @@
+{
+  "WindowBackground": "#111827",
+  "SurfaceBackground": "#1F2937",
+  "InputBackground": "#0B1220",
+  "TextPrimary": "#F8FAFC",
+  "TextMuted": "#CBD5E1",
+  "ButtonBackground": "#334155",
+  "ButtonText": "#F8FAFC",
+  "ButtonHover": "#475569",
+  "Accent": "#22D3EE",
+  "AccentText": "#082F49",
+  "AccentHover": "#67E8F9",
+  "Border": "#64748B",
+  "SelectionBackground": "#0E7490",
+  "SelectionText": "#FFFFFF",
+  "UserAccent": "#7DD3FC",
+  "AssistantAccent": "#6EE7B7",
+  "Danger": "#FDA4AF",
+  "FooterIconButtonSize": 44,
+  "FooterModelSelectorWidth": 220,
+  "FooterSendButtonWidth": 148
+}
