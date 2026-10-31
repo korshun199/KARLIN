@@ -2,4 +2,5 @@
 /api_key.cmd.*
 !/api_key.cmd.example
 *.before-*
+/sessions/
 /masha-agent-test.txt
